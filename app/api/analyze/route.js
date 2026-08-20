@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { createClient } from '../../../lib/supabase/server';
 import {
   CATEGORIES,
   computeWeights,
@@ -228,7 +229,7 @@ export async function POST(request) {
       0,
       Math.min(100, Math.round(Number(data.atsMatch) || 0))
     );
-    return Response.json({
+    const result = {
       overallScore: clamped,
       atsMatch: atsClamped,
       verdict: data.verdict || 'REVIEWED',
@@ -244,7 +245,36 @@ export async function POST(request) {
         original: String(r.original || ''),
         suggestion: String(r.suggestion || ''),
       })),
-    });
+    };
+
+    // --- Persist to Supabase (best-effort) ---
+    // Saves the analysis to the `analyses` table. Failures are logged but NEVER
+    // break the response — the user still gets their results either way.
+    try {
+      const { error: dbError } = await createClient()
+        .from('analyses')
+        .insert({
+          resume_name: file?.name || 'Untitled resume',
+          job_description: jobDescription,
+          overall_score: clamped,
+          category_scores: result.sectionScores,
+          strengths: result.strengths,
+          weaknesses: result.weaknesses,
+          matched_keywords: result.matchedKeywords,
+          missing_keywords: result.missingKeywords,
+          bullet_suggestions: result.rewrites,
+        });
+
+      if (dbError) {
+        console.error('Supabase insert failed:', dbError);
+      } else {
+        console.log('Analysis saved to Supabase for:', file?.name || 'Untitled resume');
+      }
+    } catch (err) {
+      console.error('Supabase save threw:', err);
+    }
+
+    return Response.json(result);
   } catch (err) {
     console.error('/api/analyze unexpected error:', err);
     return Response.json(
